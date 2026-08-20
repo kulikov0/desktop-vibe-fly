@@ -4,6 +4,19 @@
 // None of these trigger a TCC permission dialog.
 
 import Cocoa
+import ApplicationServices
+
+func axTrusted() -> Bool { AXIsProcessTrusted() }
+
+// The prompt is only shown once per binary by TCC, so also deep-link the pane.
+func axRequestAccess() {
+    let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+    _ = AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
+    if let u = URL(string: "x-apple.systempreferences:com.apple.preference.security"
+                   + "?Privacy_Accessibility") {
+        NSWorkspace.shared.open(u)
+    }
+}
 
 // A walkable window top edge, in scene coordinates (origin at screen center).
 struct Ledge {
@@ -13,20 +26,32 @@ struct Ledge {
     let id: Int
 }
 
+struct VibeTarget {
+    let center: CGPoint
+    let topY: CGFloat
+    let score: Double
+    let token: String
+    let owner: String
+    let openness: Double
+}
+
 final class WindowSense {
     struct Snapshot {
         let ledges: [Ledge]
         let newWindows: [(center: CGPoint, size: CGFloat)]
+        let vibe: [VibeTarget]
+        let occluders: [CGRect]
     }
 
     private var knownIDs = Set<Int>()
     private var first = true
     private let myPID = NSRunningApplication.current.processIdentifier
 
-    func poll(screen: NSRect) -> Snapshot {
+    func poll(screen: NSRect, index: VibeIndex = VibeIndex(),
+              settings: VibeSettings = VibeSettings()) -> Snapshot {
         guard let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
                                                     kCGNullWindowID) as? [[String: Any]] else {
-            return Snapshot(ledges: [], newWindows: [])
+            return Snapshot(ledges: [], newWindows: [], vibe: [], occluders: [])
         }
         // CG global coords are top-left-of-primary; Cocoa are bottom-left-of-primary.
         let primaryH = NSScreen.screens.first(where: { $0.frame.origin == .zero })?.frame.height
@@ -34,6 +59,8 @@ final class WindowSense {
         let W = screen.width, H = screen.height
         var ledges: [Ledge] = []
         var newWins: [(CGPoint, CGFloat)] = []
+        var vibe: [VibeTarget] = []
+        var occluders: [CGRect] = []
         var ids = Set<Int>()
         for w in info {
             guard (w["kCGWindowLayer"] as? Int) == 0,                     // normal windows only
@@ -55,15 +82,37 @@ final class WindowSense {
             if topY < H / 2 - 8, topY > -H / 2 + 8, x1 - x0 > 100, ledges.count < 12 {
                 ledges.append(Ledge(y: topY, x0: x0, x1: x1, id: num))
             }
+            let center = CGPoint(x: rect.midX - screen.midX,
+                                 y: (primaryH - rect.midY) - screen.midY)
+            occluders.append(CGRect(x: rect.minX - screen.midX,
+                                    y: (primaryH - rect.maxY) - screen.midY,
+                                    width: rect.width, height: rect.height))
             if !first && !knownIDs.contains(num) {
-                let center = CGPoint(x: rect.midX - screen.midX,
-                                     y: (primaryH - rect.midY) - screen.midY)
                 newWins.append((center, max(rect.width, rect.height)))
+            }
+            if !index.isEmpty, let owner = w["kCGWindowOwnerName"] as? String {
+                let title = (w["kCGWindowName"] as? String) ?? ""
+                guard settings.windowOwners.contains(owner) else { continue }
+                var best = 0.0
+                var bestToken = ""
+                for tok in vibeTitleTokens(title) where index.weight(for: tok) > best {
+                    best = index.weight(for: tok)
+                    bestToken = tok
+                }
+                if title.isEmpty && best == 0 {
+                    best = settings.ownerFallbackScore
+                    bestToken = "owner:" + owner
+                }
+                if best >= settings.minScore {
+                    vibe.append(VibeTarget(center: center, topY: topY, score: best,
+                                           token: bestToken, owner: owner,
+                                           openness: settings.opennessEditor))
+                }
             }
         }
         knownIDs = ids
         first = false
-        return Snapshot(ledges: ledges, newWindows: newWins)
+        return Snapshot(ledges: ledges, newWindows: newWins, vibe: vibe, occluders: occluders)
     }
 }
 

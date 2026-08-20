@@ -100,6 +100,10 @@ final class LIFSim {
     private(set) var escw: [Int] = []      // DNp02/04/11 escape-maneuver (wing) DNs
     private(set) var ascend: [Int] = []    // ascending partners (leg proprioception)
     private(set) var sens: [Int] = []      // sensory partners (air-puff pathway)
+    private(set) var dnaDriveL: [Int] = [] // strongest real presynaptic partners of DNa-left
+    private(set) var dnaDriveR: [Int] = []
+    private(set) var fwdDrive: [Int] = []
+    private(set) var arousalPool: [Int] = []  // partners presynaptic to DNp09
     private var ascendPhase: [Float] = []  // per-ascending-neuron gait phase offset
 
     // inputs (0..1), set each frame by the coordinator
@@ -108,6 +112,10 @@ final class LIFSim {
     var gaitDrive: Float = 0   // body walking intensity -> ascending neurons
     var gaitPhase: Float = 0   // body gait phase 0..1 -> rhythmic proprioception
     var airPuff: Float = 0     // fast cursor motion near the fly -> sensory neurons
+    var attractL: Float = 0    // appetitive bearing to a vibecode window, per eye
+    var attractR: Float = 0
+    var attractFwd: Float = 0
+    var attractArousal: Float = 0
     var activityScale: Float = 1  // circadian / sleep neuromodulation of baseline+noise
     var sensoryGate: Float = 1    // sleep gates sensory input (raised arousal threshold)
 
@@ -139,6 +147,9 @@ final class LIFSim {
     private let pNoise: Float = 0.0022
     private let noiseKick: Float = 0.42
     private let loomGain: Float = 0.30
+    private let attractGain: Float = 0.07
+    private let attractFwdGain: Float = 0.30
+    private let attractArousalGain: Float = 0.05
     private let rateAlpha: Float = 1.0 / 120.0
     private var burstUntil = 0            // occasional "arousal" noise bursts
     private var burstNext = 12_000
@@ -234,6 +245,34 @@ final class LIFSim {
             w[fill[pre]] = weight
             fill[pre] += 1
         }
+
+        let dnaLSet = Set(dnaL), dnaRSet = Set(dnaR), fwdSet = Set(fwd)
+        var toL = [Int: Float](), toR = [Int: Float](), toF = [Int: Float]()
+        for e in circuit.edges where e[2] > 0 {
+            let pre = Int(e[0]), post = Int(e[1])
+            guard roles[pre] == "other" else { continue }
+            if dnaLSet.contains(post) { toL[pre, default: 0] += e[2] }
+            else if dnaRSet.contains(post) { toR[pre, default: 0] += e[2] }
+            else if fwdSet.contains(post) { toF[pre, default: 0] += e[2] }
+        }
+        dnaDriveL = toL.filter { $0.value > (toR[$0.key] ?? 0) }
+            .sorted { $0.value > $1.value }.prefix(12).map { $0.key }
+        dnaDriveR = toR.filter { $0.value > (toL[$0.key] ?? 0) }
+            .sorted { $0.value > $1.value }.prefix(12).map { $0.key }
+        fwdDrive = toF.sorted { $0.value > $1.value }.prefix(6).map { $0.key }
+
+        // raising whole-population rate must not touch the escape pathway:
+        // exclude sensory partners and anything presynaptic to the giant fiber
+        let blockSet = Set(gf).union(mdn)
+        var gfDrivers = Set<Int>()
+        var outWeight = [Int: Float]()
+        for e in circuit.edges where e[2] > 0 {
+            let pre = Int(e[0]), post = Int(e[1])
+            if blockSet.contains(post) { gfDrivers.insert(pre) }
+            if roles[pre] == "other" && types[pre] != "sensory" { outWeight[pre, default: 0] += e[2] }
+        }
+        arousalPool = outWeight.filter { !gfDrivers.contains($0.key) }
+            .sorted { $0.value > $1.value }.prefix(50).map { $0.key }
     }
 
     func consumeGF() -> Bool {
@@ -277,6 +316,12 @@ final class LIFSim {
             }
             // fast air movement near the fly -> sensory pathway
             if airPuff > 0.001 { for i in sens { v[i] += airPuff * 0.12 * sensoryGate } }
+            if attractL > 0.001 { for i in dnaDriveL { v[i] += attractL * attractGain } }
+            if attractR > 0.001 { for i in dnaDriveR { v[i] += attractR * attractGain } }
+            if attractFwd > 0.001 { for i in fwdDrive { v[i] += attractFwd * attractFwdGain } }
+            if attractArousal > 0.001 {
+                for i in arousalPool { v[i] += attractArousal * attractArousalGain }
+            }
             // brain-window click stimulation
             for s in activeStims where simMs < s.untilMs {
                 for i in s.idx { v[i] += s.strength }

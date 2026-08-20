@@ -10,6 +10,7 @@ let FLY_SCALE: CGFloat = 1.15
 let EDGE_MARGIN: CGFloat = 50
 let SCARE_RADIUS: CGFloat = 110        // legacy behavior (non-connectome flies) only
 let NERVOUS_RADIUS: CGFloat = 240      // legacy behavior only
+let FLIGHT_TURN_GAIN: CGFloat = 2.0    // DNa steering is stronger in the air
 
 func rnd(_ range: ClosedRange<CGFloat>) -> CGFloat { CGFloat.random(in: range) }
 func clampf(_ v: CGFloat, _ lo: CGFloat, _ hi: CGFloat) -> CGFloat { min(hi, max(lo, v)) }
@@ -276,8 +277,6 @@ final class Fly {
         state == .walking ? clampf(abs(backwardTimer > 0 ? 22 : speed) / 60, 0, 1) : 0
     }
 
-    var flightFrom = CGPoint.zero
-    var flightTo = CGPoint.zero
     var flightT: CGFloat = 0
     var flightDur: CGFloat = 1
     var flightEffort: CGFloat = 0.6   // set at takeoff: escape=1, casual from arousal
@@ -289,6 +288,8 @@ final class Fly {
     private var brainLive = false
     private var liveArousal: CGFloat = 0
     private var liveWing: CGFloat = 0
+    private var liveTurn: CGFloat = 0
+    private var escapeFlight = false
 
     init(at p: CGPoint) {
         model = buildFlyModel()
@@ -309,35 +310,13 @@ final class Fly {
         effortCurrent = flightEffort
         flapPhase = 0
         wingRaise = 0
-        flightFrom = pos
-        let hw = bounds.width / 2 - EDGE_MARGIN, hh = bounds.height / 2 - EDGE_MARGIN
-        var target = CGPoint.zero
-        var chosen = false
-        // casual flights often land on a window edge
-        if !escape, awayFrom == nil, !terrain.isEmpty, rnd(0...1) < 0.45 {
-            let L = terrain[Int.random(in: 0..<terrain.count)]
-            if L.x1 - L.x0 > 90 {
-                target = CGPoint(x: rnd((L.x0 + 25)...(L.x1 - 25)), y: L.y)
-                chosen = hypot(target.x - pos.x, target.y - pos.y) > 180
-            }
+        escapeFlight = escape
+        // no destination: the fly takes off along its current heading and DNa
+        // steers it in the air, exactly as it steers walking
+        if let a = awayFrom {
+            heading = atan2(pos.y - a.y, pos.x - a.x) + rnd(-0.4...0.4)
         }
-        if !chosen {
-            for _ in 0..<16 {
-                target = CGPoint(x: rnd(-hw...hw), y: rnd(-hh...hh))
-                let far = hypot(target.x - pos.x, target.y - pos.y) > (escape ? 350 : 260)
-                if !far { continue }
-                if let a = awayFrom {
-                    // escape away from the threat: target must be on the far side
-                    let toT = CGPoint(x: target.x - pos.x, y: target.y - pos.y)
-                    let toA = CGPoint(x: a.x - pos.x, y: a.y - pos.y)
-                    if toT.x * toA.x + toT.y * toA.y > 0 { continue }
-                }
-                break
-            }
-        }
-        flightTo = target
-        let dist = hypot(target.x - pos.x, target.y - pos.y)
-        flightDur = escape ? clampf(dist / 650, 0.45, 1.2) : clampf(dist / 420, 0.7, 2.0)
+        flightDur = escape ? rnd(0.6...1.2) : rnd(0.9...2.2)
         flightT = 0
         scareCooldown = escape ? 2.0 : 2.5
         // wings stay visible and beat; blur discs add the motion-smear
@@ -396,9 +375,10 @@ final class Fly {
         brainLive = signals != nil
         liveArousal = signals?.arousal ?? 0
         liveWing = signals?.wingDrive ?? 0
+        liveTurn = signals?.turnBias ?? 0
 
         if state == .flying {
-            updateFlight(dt: dt)
+            updateFlight(dt: dt, bounds: bounds)
         } else if let s = signals {
             brainBehavior(s, dt: dt, bounds: bounds, mouse: mouse)
             if state == .walking { updateWalk(dt: dt, bounds: bounds) }
@@ -494,11 +474,11 @@ final class Fly {
                 let target = (14 + s.walkDrive * 55) * s.tempo
                 speed += (target - speed) * min(1, 3 * dt)
             }
-            if ledge == nil { heading += s.turnBias * dt }   // DNa01/DNa02 steering
+            heading += s.turnBias * dt   // DNa01/DNa02 steering
         }
         // spontaneous takeoff, gated on whole-population arousal; flight
         // altitude/effort scales with how aroused the network is
-        let flightChance: CGFloat = s.arousal > 0.5 ? 0.6 : 0.005
+        let flightChance: CGFloat = s.arousal > 0.5 ? 0.15 : 0.005
         if state == .walking && rnd(0...1) < flightChance * dt {
             startFlight(bounds: bounds, effort: 0.35 + s.arousal * 0.6)
         }
@@ -518,6 +498,10 @@ final class Fly {
             }
         }
         if let L = ledge {
+            if brainLive && abs(liveTurn) > 0.15 && rnd(0...1) < 0.8 * dt {
+                ledge = nil
+                return
+            }
             // walk along the window edge
             heading += rnd(-1...1) * 0.2 * dt
             let along: CGFloat = cos(heading) >= 0 ? 0 : .pi
@@ -529,7 +513,7 @@ final class Fly {
             pos.x = clampf(pos.x, L.x0, L.x1)
             if rnd(0...1) < 0.05 * dt { ledge = nil }   // wander off the edge
         } else {
-            heading += rnd(-1...1) * 1.6 * dt
+            heading += rnd(-1...1) * (brainLive ? 0.25 : 1.6) * dt
             let hw = bounds.width / 2 - EDGE_MARGIN, hh = bounds.height / 2 - EDGE_MARGIN
             if abs(pos.x) > hw || abs(pos.y) > hh {
                 let toCenter = atan2(-pos.y, -pos.x)
@@ -562,34 +546,38 @@ final class Fly {
         node.position = p
     }
 
-    private func updateFlight(dt: CGFloat) {
+    private func updateFlight(dt: CGFloat, bounds: CGSize) {
         flightT = min(1, flightT + dt / flightDur)
-        if flightT >= 1 {
-            // touchdown flare: the timer ended, but the fly lands only when it
-            // has actually descended — hover over the target and settle down.
-            pos.x = flightTo.x + sin(time * 26) * 1.2
-            pos.y = flightTo.y + cos(time * 22) * 1.0
-            pitch = clampf(alt * 0.4, 0, 0.35)   // gentle nose-up flare
-            alt += (0 - alt) * min(1, 9 * dt)
-            applyAltitude()
-            if alt < 0.035 { pos = flightTo; land() }
-            return
-        }
-        let e = smoothstep(flightT)
-        let dx = flightTo.x - flightFrom.x, dy = flightTo.y - flightFrom.y
-        let len = max(1, hypot(dx, dy))
-        let px = -dy / len, py = dx / len
-        let wob = sin(time * 32) * 4 * sin(flightT * .pi)
-        pos.x = flightFrom.x + dx * e + px * wob
-        pos.y = flightFrom.y + dy * e + py * wob
-        heading = atan2(dy, dx) + sin(time * 18) * 0.12
-        // altitude: climb, effort-scaled cruise with buzz-wobble, descend to land.
         // Effort stays live: ongoing escape-DN (DNp02/04/11) and arousal activity
         // pushes the fly to beat harder and fly higher mid-flight.
         effortCurrent = brainLive
             ? clampf(max(flightEffort,
                          flightEffort * 0.55 + liveArousal * 0.25 + liveWing * 0.6), 0.25, 1.3)
             : flightEffort
+
+        if flightT >= 1 {
+            // touchdown flare: settle down where the wings stopped carrying it
+            pitch = clampf(alt * 0.4, 0, 0.35)
+            alt += (0 - alt) * min(1, 9 * dt)
+            pos.x += cos(heading) * 24 * dt
+            pos.y += sin(heading) * 24 * dt
+            applyAltitude()
+            if alt < 0.035 { land() }
+            return
+        }
+
+        if !escapeFlight { heading += liveTurn * FLIGHT_TURN_GAIN * dt }
+        heading += sin(time * 18) * 0.5 * dt
+        let hw = bounds.width / 2 - EDGE_MARGIN, hh = bounds.height / 2 - EDGE_MARGIN
+        if abs(pos.x) > hw || abs(pos.y) > hh {
+            heading += angleDiff(heading, atan2(-pos.y, -pos.x)) * min(1, 3 * dt)
+        }
+        let airSpeed = 240 + 360 * effortCurrent
+        pos.x += cos(heading) * airSpeed * dt
+        pos.y += sin(heading) * airSpeed * dt
+        pos.x = clampf(pos.x, -bounds.width / 2 + 20, bounds.width / 2 - 20)
+        pos.y = clampf(pos.y, -bounds.height / 2 + 20, bounds.height / 2 - 20)
+
         let riseEnv = min(flightT / 0.25, 1)
         let fallEnv = min((1 - flightT) / 0.3, 1)
         let target = effortCurrent * min(riseEnv, fallEnv) * (0.85 + 0.15 * sin(time * 7))

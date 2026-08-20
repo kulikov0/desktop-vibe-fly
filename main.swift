@@ -220,8 +220,81 @@ func runSimtest() {
     print(String(format: "click probes: GF cluster -> spike %@, DNg11 cluster -> groom rate %.0f Hz",
                  gfStim ? "yes" : "NO", groomStim))
 
-    let pass = gfSpont == 0 && gfLoom > 0 && walkOn > 0 && gfStim && siestaPct > 3
-    print(pass ? "PASS: GF silent at rest, fires on loom; locomotor drive fluctuates; stim works; siesta alive"
+    // Phase 7: vibecode attraction. Spontaneous DNa drift and noise bursts are
+    // worth several Hz, so control and drive alternate in 1 s blocks and only
+    // the settled half of each block is sampled.
+    var gfAttractOn = 0, gfAttractOff = 0
+    var diffOff: Float = 0, diffOn: Float = 0, popOff: Float = 0, popOn: Float = 0
+    var fwdOff: Float = 0, fwdOn: Float = 0
+    var attractSamples: Float = 0
+    for block in 0..<20 {
+        let on = block % 2 == 1
+        sim.attractL = on ? 0.30 : 0
+        sim.attractR = on ? 0.03 : 0
+        sim.attractFwd = on ? 0.15 : 0
+        for ms in 0..<1000 {
+            sim.step(1)
+            if sim.consumeGF() { if on { gfAttractOn += 1 } else { gfAttractOff += 1 } }
+            guard ms >= 500 else { continue }
+            if on {
+                diffOn += sim.rateDNaL - sim.rateDNaR
+                popOn += sim.ratePop
+                fwdOn += sim.rateFwd
+                attractSamples += 1
+            } else {
+                diffOff += sim.rateDNaL - sim.rateDNaR
+                popOff += sim.ratePop
+                fwdOff += sim.rateFwd
+            }
+        }
+    }
+    sim.attractL = 0; sim.attractR = 0; sim.attractFwd = 0
+    diffOff /= attractSamples; diffOn /= attractSamples; popOff /= attractSamples; popOn /= attractSamples
+    fwdOff /= attractSamples; fwdOn /= attractSamples
+    let popGrowth = (popOn - popOff) / max(0.001, popOff)
+    print(String(format: "attraction (drivers L %d / R %d / fwd %d): DNa L-R %+.1f -> %+.1f Hz, "
+                 + "DNp09 %.1f -> %.1f Hz, GF %d vs %d spontaneous, pop %+.0f%%",
+                 sim.dnaDriveL.count, sim.dnaDriveR.count,
+                 sim.fwdDrive.count, diffOff, diffOn, fwdOff, fwdOn,
+                 gfAttractOn, gfAttractOff, 100 * popGrowth))
+
+    // 20%: arousal is ratePop/20, so this keeps it near 0.33 against the 0.5
+    // spontaneous-takeoff gate
+    // Phase 8: odour-driven arousal must reach the takeoff gate (0.5) without
+    // waking the giant fiber
+    var arousalOff: Float = 0, arousalOn: Float = 0
+    var gfArousalOn = 0, gfArousalOff = 0
+    var mdnOn: Float = 0, mdnOff: Float = 0
+    var arousalSamples: Float = 0
+    for block in 0..<10 {
+        let on = block % 2 == 1
+        sim.attractArousal = on ? 1.0 : 0
+        for ms in 0..<1000 {
+            sim.step(1)
+            if sim.consumeGF() { if on { gfArousalOn += 1 } else { gfArousalOff += 1 } }
+            guard ms >= 500 else { continue }
+            if on { arousalOn += sim.ratePop / 20; mdnOn += sim.rateMDN; arousalSamples += 1 }
+            else { arousalOff += sim.ratePop / 20; mdnOff += sim.rateMDN }
+        }
+    }
+    sim.attractArousal = 0
+    arousalOff /= arousalSamples; arousalOn /= arousalSamples
+    mdnOff /= arousalSamples; mdnOn /= arousalSamples
+    print(String(format: "odour arousal (pool %d): %.2f -> %.2f (gate 0.50), MDN %.1f -> %.1f Hz "
+                 + "(backward gate 8), GF %d vs %d spontaneous",
+                 sim.arousalPool.count, arousalOff, arousalOn, mdnOff, mdnOn,
+                 gfArousalOn, gfArousalOff))
+
+    // MDN must stay under the backward-walking gate: the arousal pool once
+    // drove it to 11 Hz and the fly moonwalked permanently
+    let arousalOK = arousalOn > 0.5 && arousalOn < 0.75 && mdnOn < 8
+        && gfArousalOn <= gfArousalOff + 1
+    // GF must not fire *more* under drive than it does spontaneously; a bare
+    // zero would flake on the occasional spontaneous spike over 20 s
+    let attractOK = diffOn - diffOff > 2 && gfAttractOn <= gfAttractOff + 1
+        && popGrowth < 0.20 && arousalOK
+    let pass = gfSpont == 0 && gfLoom > 0 && walkOn > 0 && gfStim && siestaPct > 3 && attractOK
+    print(pass ? "PASS: GF silent at rest, fires on loom; locomotor drive fluctuates; stim works; siesta alive; attraction steers"
                : "FAIL: tune weights/noise")
     exit(pass ? 0 : 1)
 }
@@ -445,11 +518,75 @@ func runBehaviorTest() {
                        landed ? "yes" : "NO", maxDS, maxDZ))
     }
 
+    bodyCheck("DNa steers the fly in flight (no scripted destination)") {
+        func run(turn: CGFloat) -> CGFloat {
+            let fly = Fly(at: .zero)
+            fly.state = .idle
+            fly.heading = 0
+            fly.startFlight(bounds: bounds, effort: 0.6)
+            var s = BrainSignals()
+            s.turnBias = turn
+            var frames = 0
+            while fly.state == .flying && frames < 45 {
+                frames += 1
+                fly.update(dt: dt, bounds: bounds, mouse: nil, signals: s)
+            }
+            return fly.heading
+        }
+        let straight = run(turn: 0), left = run(turn: 0.8)
+        return (left - straight > 0.6,
+                String(format: "heading after 0.75 s: %+.2f straight vs %+.2f with DNa left",
+                       straight, left))
+    }
+
     bodyCheck("circadian curve: siesta + night dips, dawn/dusk peaks") {
         let night = circadianActivity(hour: 3), dawn = circadianActivity(hour: 9)
         let siesta = circadianActivity(hour: 14), dusk = circadianActivity(hour: 18)
         let ok = night < 0.4 && dawn > 0.9 && siesta < 0.7 && siesta > 0.3 && dusk > 0.9
         return (ok, String(format: "3h %.2f, 9h %.2f, 14h %.2f, 18h %.2f", night, dawn, siesta, dusk))
+    }
+
+    bodyCheck("vibecode target on the left -> fly steers onto it") {
+        // Locomotion is stochastic, so this asserts the steering outcome the
+        // pull reliably produces (heading reaching the target) rather than a
+        // full approach, and retries once.
+        func trial() -> (aligned: Bool, minBearing: CGFloat, minDist: CGFloat, walk: Int) {
+            let sim = LIFSim(circuit: data.circuit, spikeBus: nil)
+            let builder = SignalBuilder()
+            let settings = VibeSettings()
+            let fly = Fly(at: .zero)
+            fly.state = .walking
+            fly.speed = 30
+            let target = CGPoint(x: 0, y: 420)
+            sim.step(400)
+            _ = sim.consumeGF()
+            fly.heading = 0
+            func bearing() -> CGFloat {
+                abs(angleDiff(fly.heading, atan2(target.y - fly.pos.y, target.x - fly.pos.x)))
+            }
+            func dist() -> CGFloat { hypot(target.x - fly.pos.x, target.y - fly.pos.y) }
+            var minBearing = bearing(), minDist = dist(), walkFrames = 0
+            let frames = 1800
+            for _ in 0..<frames {
+                let a = attractionSplit(pos: fly.pos, heading: fly.heading, target: target,
+                                        weight: 9.7, d0: 200, settings: settings, gate: 1)
+                sim.attractL = a.l
+                sim.attractR = a.r
+                sim.attractFwd = a.fwd
+                sim.step(Int((dt * 1000).rounded()))
+                let s = builder.make(sim, dt: dt, holdSteering: true)
+                fly.update(dt: dt, bounds: bounds, mouse: nil, signals: s)
+                minBearing = min(minBearing, bearing())
+                minDist = min(minDist, dist())
+                if fly.state == .walking { walkFrames += 1 }
+            }
+            return (minBearing < 0.5, minBearing, minDist, walkFrames * 100 / frames)
+        }
+        var t = trial()
+        if !t.aligned { t = trial() }
+        return (t.aligned,
+                String(format: "best bearing %.2f rad (start 1.57), closest %d pt of 420, walking %d%%",
+                       t.minBearing, Int(t.minDist), t.walk))
     }
 
     print(failures == 0 ? "ALL BEHAVIOR TESTS PASS" : "\(failures) FAILURES")
@@ -460,15 +597,51 @@ func runBehaviorTest() {
 
 // Converts sim population rates into body commands. Shared by the app loop
 // and --behaviortest so both exercise the identical mapping.
+func odorConcentration(weight: CGFloat, dist: CGFloat, d0: CGFloat) -> CGFloat {
+    weight / (1 + dist / max(1, d0))
+}
+
+func attractionSplit(pos: CGPoint, heading: CGFloat, target: CGPoint, weight: CGFloat,
+                     d0: CGFloat, settings: VibeSettings,
+                     gate: CGFloat) -> (l: Float, r: Float, fwd: Float) {
+    let rel = CGPoint(x: target.x - pos.x, y: target.y - pos.y)
+    let dist = max(20, hypot(rel.x, rel.y))
+    let conc = odorConcentration(weight: weight, dist: dist, d0: d0)
+    let drive = settings.attractGain * clampf(conc / CGFloat(settings.odorFull), 0, 1) * gate
+    guard drive > 0.001 else { return (0, 0, 0) }
+    let rd = CGPoint(x: rel.x / dist, y: rel.y / dist)
+    let f = CGPoint(x: cos(heading), y: sin(heading))
+    let crossZ = f.x * rd.y - f.y * rd.x
+    let ahead = f.x * rd.x + f.y * rd.y
+    // Purely differential: on target both sides get zero, so the residual
+    // imbalance between the two driver groups cannot keep spinning the fly.
+    // A target behind gives crossZ ~ 0 too, so it commits to one side instead.
+    var l = drive * max(0, crossZ)
+    var r = drive * max(0, -crossZ)
+    if ahead < 0 {
+        l = crossZ >= 0 ? drive : 0
+        r = crossZ >= 0 ? 0 : drive
+    }
+    return (Float(l), Float(r), Float(drive * clampf(ahead, 0, 1)))
+}
+
 final class SignalBuilder {
     private var dnaBaseline: Float = 0
+    private var primed = false
 
-    func make(_ sim: LIFSim, dt: CGFloat) -> BrainSignals {
+    func make(_ sim: LIFSim, dt: CGFloat, holdSteering: Bool = false) -> BrainSignals {
         let diff = sim.rateDNaL - sim.rateDNaR
+        // starting from zero leaves the standing wiring asymmetry unsubtracted
+        // for ~30 s, which reads as a constant turn bias
+        if !primed { dnaBaseline = diff; primed = true }
         // Slow adaptation (tau ~8 s): the connectome's persistent left/right
         // wiring asymmetry is adapted out, so steady-state walking is straight
         // and only transient DNa asymmetries (visual, stimulation) steer.
-        dnaBaseline += (diff - dnaBaseline) * Float(min(1, dt / 8))
+        // Stretched to ~60 s while an appetitive target is driving: a 3 s
+        // attraction bout must not be adapted away, but the standing wiring
+        // asymmetry still has to be removed or it adds to the pull.
+        let tau: CGFloat = holdSteering ? 20 : 8
+        dnaBaseline += (diff - dnaBaseline) * Float(min(1, dt / tau))
         var s = BrainSignals()
         s.escape = sim.consumeGF()
         s.nervous = clampf(CGFloat(sim.rateLoom) / 80, 0, 1)
@@ -513,9 +686,19 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     private var windowLoomR: Float = 0
     private(set) var lastFlyPos = CGPoint.zero
 
-    init(bounds: CGSize, sim: LIFSim?) {
+    private let vibe: VibeSettings
+    private var odorSources: [(point: CGPoint, weight: CGFloat, token: String)] = []
+    private var vibeTarget: (point: CGPoint, weight: CGFloat, token: String)?
+    private var odorD0: CGFloat = 200
+    private var satiation: CGFloat = 0
+    private var vibeLogTime: TimeInterval = 0
+    private var boutOn = false
+    private var boutTime: CGFloat = 0
+
+    init(bounds: CGSize, sim: LIFSim?, vibe: VibeSettings = VibeSettings()) {
         self.bounds = bounds
         self.sim = sim
+        self.vibe = vibe
         self.scene = buildScene(bounds: bounds)
         super.init()
         enqueue { $0.addFlyNow() }
@@ -552,10 +735,56 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
     func setTerrain(_ ledges: [Ledge]) { enqueue { $0.terrain = ledges } }
 
+    func setOdorSources(_ s: [(point: CGPoint, weight: CGFloat, token: String)]) {
+        enqueue { c in
+            c.odorSources = s
+            c.odorD0 = hypot(c.bounds.width, c.bounds.height) / c.vibe.d0Divisor
+        }
+    }
+
+    private func strongestSource(from pos: CGPoint)
+        -> (target: (point: CGPoint, weight: CGFloat, token: String)?, total: CGFloat,
+            dist: CGFloat, best: CGFloat) {
+        var best: (point: CGPoint, weight: CGFloat, token: String)?
+        var bestConc: CGFloat = 0
+        var bestDist: CGFloat = 0
+        var total: CGFloat = 0
+        for s in odorSources {
+            let d = hypot(s.point.x - pos.x, s.point.y - pos.y)
+            let conc = odorConcentration(weight: s.weight, dist: d, d0: odorD0)
+            guard conc > CGFloat(vibe.odorThreshold) else { continue }
+            total += conc
+            if conc > bestConc { bestConc = conc; best = s; bestDist = d }
+        }
+        return (best, total, bestDist, bestConc)
+    }
+
+    private func computeAttraction(fly: Fly, dt: CGFloat) -> (l: Float, r: Float, fwd: Float) {
+        let sensed = strongestSource(from: fly.pos)
+        vibeTarget = sensed.target
+        satiation = clampf(sensed.best / CGFloat(vibe.odorFull), 0, 1)
+        // motivation to fly is about being FAR from the smell: concentration rises
+        // on approach, so feeding it raw would make her take off next to the folder
+        let reach = clampf((sensed.dist - odorD0) / (2 * odorD0), 0, 1)
+        sim?.attractArousal = Float(clampf(sensed.total / CGFloat(vibe.arousalFull), 0, 1) * reach)
+        guard let t = sensed.target else { boutOn = false; satiation = 0; return (0, 0, 0) }
+        if boutOn {
+            boutTime -= dt
+            if boutTime <= 0 { boutOn = false }
+        } else if rnd(0...1) < dt / vibe.boutEverySeconds {
+            boutOn = true
+            boutTime = vibe.boutSeconds
+        }
+        return attractionSplit(pos: fly.pos, heading: fly.heading, target: t.point,
+                               weight: t.weight, d0: odorD0, settings: vibe,
+                               gate: boutOn ? 1 : vibe.idleDrive)
+    }
+
     // the fly moved to a different display: new bounds + camera extent
     func retarget(size: CGSize) {
         enqueue { c in
             c.bounds = size
+            c.odorD0 = hypot(size.width, size.height) / c.vibe.d0Divisor
             c.terrain = []   // stale until the next window poll
             if let camNode = c.scene.rootNode.childNode(withName: "camera", recursively: false) {
                 camNode.camera?.orthographicScale = Double(size.height / 2)
@@ -658,13 +887,38 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             sim.loomL = max(sensory.l, windowLoomL)
             sim.loomR = max(sensory.r, windowLoomR)
             sim.airPuff = max(sensory.puff, Float(typingLevel * 0.30))
+            let attract = computeAttraction(fly: first, dt: dt)
+            sim.attractL = attract.l
+            sim.attractR = attract.r
+            sim.attractFwd = attract.fwd
+            if vibeDebug && t - vibeLogTime > 0.5 {
+                vibeLogTime = t
+                let hdg = first.heading
+                if let vt = vibeTarget {
+                    let rel = CGPoint(x: vt.point.x - first.pos.x, y: vt.point.y - first.pos.y)
+                    let d = hypot(rel.x, rel.y)
+                    let bear = angleDiff(hdg, atan2(rel.y, rel.x))
+                    vibeLog(String(format: "fly (%.0f,%.0f) hdg %+.2f | target \"%@\" %.1f at "
+                            + "(%.0f,%.0f) d=%.0f bearing %+.2f | drive L/R/F %.3f/%.3f/%.3f %@",
+                            first.pos.x, first.pos.y, hdg, vt.token, vt.weight,
+                            vt.point.x, vt.point.y, d, bear,
+                            attract.l, attract.r, attract.fwd, boutOn ? "BOUT" : "idle"))
+                } else {
+                    vibeLog(String(format: "fly (%.0f,%.0f) hdg %+.2f | no target",
+                                   first.pos.x, first.pos.y, hdg))
+                }
+            }
             // body -> brain: leg proprioception from the current gait
             sim.gaitDrive = Float(first.walkingIntensity)
             sim.gaitPhase = Float(first.gaitPhasePublic)
             // circadian + sleep neuromodulation. Compressed: the LIF neurons sit
             // just below threshold, so a raw multiplier silences them entirely —
             // siesta should mean "less active", not comatose.
+            // sitting on a strong source damps the whole population: a fed fly
+            // does not take off. Compressed like the circadian scale — a linear
+            // multiplier here silences the network entirely.
             sim.activityScale = (1 - (1 - activity) * 0.35) * (sleepy ? 0.75 : 1)
+                * Float(1 - satiation * 0.2)
             sim.sensoryGate = sleepy ? 0.55 : 1
             loomOverride = max(0, loomOverride - dt * 1.2)   // override decays
             msAccumulator += Double(dt) * 1000
@@ -672,7 +926,8 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             msAccumulator -= Double(steps)
             sim.step(steps)
 
-            var s = signalBuilder.make(sim, dt: dt)
+            var s = signalBuilder.make(sim, dt: dt,
+                                       holdSteering: attract.l + attract.r + attract.fwd > 0.001)
             s.tempo = tempo
             s.sleep = sleepy
             signals = s
@@ -694,6 +949,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) {
         // only offer the display hop when there is somewhere to hop to
         moveDisplayItem?.isHidden = NSScreen.screens.count < 2
+        let trusted = axTrusted()
+        axMenuItem?.title = trusted ? "Finder Icons: enabled" : "Enable Finder Icon Attraction…"
+        axMenuItem?.isEnabled = !trusted
     }
 
     var window: NSWindow!
@@ -703,13 +961,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var mouseTimer: Timer?
     var windowTimer: Timer?
     var clickMonitor: Any?
+    var vibeTimer: Timer?
     let windowSense = WindowSense()
+    var vibeSettings = VibeSettings.load()
+    lazy var vibeSense = VibeSense(settings: vibeSettings)
+    let finderSense = FinderSense()
     var typingLevel: CGFloat = 0
     var paused = false
     var brainWC: BrainWindowController?
     var dataInfo = "no data — run etl.py"
     var screenFrame = NSRect.zero
     var moveDisplayItem: NSMenuItem?
+    var axMenuItem: NSMenuItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard let screen = NSScreen.main else { fatalError("no screen") }
@@ -725,7 +988,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             dataInfo = "FlyWire v783 · \(data.points.points.count) somas · circuit \(data.circuit.neurons.count)n/\(data.circuit.edges.count)e"
         }
 
-        coordinator = Coordinator(bounds: frame.size, sim: sim)
+        coordinator = Coordinator(bounds: frame.size, sim: sim, vibe: vibeSettings)
+        vibeSense.rescan()
+        if !axTrusted() && !UserDefaults.standard.bool(forKey: "axPromptShown") {
+            UserDefaults.standard.set(true, forKey: "axPromptShown")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { axRequestAccess() }
+        }
 
         window = NSWindow(contentRect: frame, styleMask: [.borderless],
                           backing: .buffered, defer: false)
@@ -777,11 +1045,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         // window terrain + new-window looms, ~1.4 Hz
+        vibeTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            self?.vibeSense.rescan()
+        }
+
         windowTimer = Timer.scheduledTimer(withTimeInterval: 0.7, repeats: true) { [weak self] _ in
             guard let self else { return }
-            let snap = self.windowSense.poll(screen: self.screenFrame)
+            let index = self.vibeSense.snapshot()
+            let snap = self.windowSense.poll(screen: self.screenFrame, index: index,
+                                             settings: self.vibeSettings)
             self.coordinator.setTerrain(snap.ledges)
             let flyPos = self.coordinator.flyPosition()
+            let primaryH = NSScreen.screens.first(where: { $0.frame.origin == .zero })?.frame.height
+                ?? self.screenFrame.height
+            self.finderSense.refresh(index: index, screen: self.screenFrame,
+                                     primaryH: primaryH, minScore: self.vibeSettings.minScore,
+                                     occluders: snap.occluders,
+                                     richness: self.vibeSettings.windowRichness,
+                                     richnessCap: self.vibeSettings.windowRichnessCap,
+                                     cap: self.vibeSettings.maxFolderScore,
+                                     iconOpenness: self.vibeSettings.opennessIcon,
+                                     rowOpenness: self.vibeSettings.opennessRow)
+            let windows = self.vibeSettings.windowTargets ? snap.vibe : []
+            self.coordinator.setOdorSources(
+                self.odorSources(windows, icons: self.finderSense.snapshot(), flyPos: flyPos))
             for nw in snap.newWindows {
                 let d = hypot(nw.center.x - flyPos.x, nw.center.y - flyPos.y)
                 let strength = clampf(1 - d / 480, 0, 1) * 0.75
@@ -809,6 +1096,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self.move(to: main)
             }
         }
+    }
+
+    func odorSources(_ windows: [VibeTarget], icons: [IconTarget],
+                     flyPos: CGPoint) -> [(point: CGPoint, weight: CGFloat, token: String)] {
+        var out: [(CGPoint, CGFloat, String)] = []
+        for w in windows {
+            out.append((w.center, CGFloat(w.score * w.openness), w.token))
+        }
+        for i in icons {
+            out.append((i.center, CGFloat(i.score * i.openness), i.name))
+        }
+        if vibeDebug {
+            let d0 = hypot(screenFrame.width, screenFrame.height) / vibeSettings.d0Divisor
+            for s in out.sorted(by: { $0.1 > $1.1 }).prefix(6) {
+                let d = hypot(s.0.x - flyPos.x, s.0.y - flyPos.y)
+                let conc = odorConcentration(weight: s.1, dist: d, d0: d0)
+                vibeLog(String(format: "odor \"%@\" w=%.1f d=%.0f conc=%.2f r=%.0f",
+                               s.2, s.1, d, conc,
+                               d0 * (s.1 / CGFloat(vibeSettings.odorThreshold) - 1)))
+            }
+        }
+        return out
     }
 
     func move(to screen: NSScreen) {
@@ -841,6 +1150,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(item("Pause", #selector(togglePause(_:)), "p"))
         menu.addItem(item("Show/Hide Brain", #selector(toggleBrain), "b"))
         menu.addItem(item("Escape Test (loom)", #selector(escapeTest), "e"))
+        let ax = item(axTrusted() ? "Finder Icons: enabled" : "Enable Finder Icon Attraction…",
+                      #selector(requestAX), "")
+        ax.isEnabled = !axTrusted()
+        menu.addItem(ax)
+        axMenuItem = ax
         let move = item("Move to Next Display", #selector(moveToNextDisplay), "d")
         menu.addItem(move)
         moveDisplayItem = move
@@ -863,6 +1177,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let wc = brainWC else { return }
         wc.isVisible ? wc.hide() : wc.show()
     }
+    @objc func requestAX() { axRequestAccess() }
     @objc func escapeTest() { coordinator.escapeTest() }
     @objc func addFly() { coordinator.addFly() }
     @objc func removeFly() { coordinator.removeFly() }
