@@ -111,7 +111,7 @@ struct VibeSettings {
     }
 }
 
-let vibeDebug = ProcessInfo.processInfo.environment["DESKTOPFLY_VIBE"] != "0"
+let vibeDebug = ProcessInfo.processInfo.environment["DESKTOPFLY_VIBE"] != nil
 
 func vibeLog(_ s: String) {
     guard vibeDebug else { return }
