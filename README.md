@@ -1,3 +1,52 @@
+<h1 align="center">Desktop Vibe Fly 🪰</h1>
+
+<p align="center">
+Fork of <a href="https://github.com/DenisSergeevitch/desktop-fly">DenisSergeevitch/desktop-fly</a>
+— the FlyWire-connectome desktop fly, with one addition: it smells vibecode.
+</p>
+
+<p align="center">
+  <video src="https://github.com/kulikov0/desktop-vibe-fly/raw/master/assets/showcase.mp4"
+         width="640" controls muted loop playsinline></video>
+</p>
+
+<p align="center"><sub>
+The fly homing in on a vibecoded project. If the player doesn't load, watch
+<a href="assets/showcase.mp4">assets/showcase.mp4</a>.
+</sub></p>
+
+## What this fork adds
+
+It scans your disk for agent markers (`AGENTS.md`, `CLAUDE.md`,
+`.cursor/rules`, `.kiro/steering` and ~40 more) and turns anything on screen
+that leads to them into an odour source: an editor or terminal window with the
+project open, a row in the front Finder window, a folder icon on the desktop.
+An open project smells strongest, a closed icon weakest, and the reach of each
+grows with how much vibecode it holds - a hub of six marked repos is smelled
+across the whole screen, a single weak folder only from nearby. The steering
+neurons (DNa01/DNa02) then walk the fly there, and when the smell is far the
+population wakes up enough to make it fly.
+
+Nothing else is changed - the brain, the body and the desktop senses are
+upstream's.
+
+### Install this fork
+
+```sh
+git clone https://github.com/kulikov0/desktop-vibe-fly.git
+cd desktop-vibe-fly
+./build.sh
+./DesktopFly
+```
+
+---
+
+<p align="center"><sub>
+Everything below this line is the upstream README, kept verbatim.
+</sub></p>
+
+---
+
 <p align="center">
   <img src="assets/fly.png" width="340" alt="DesktopFly — a 3D fruit fly">
 </p>
@@ -9,23 +58,6 @@ A 3D fruit fly that lives on your macOS desktop — driven by a live spiking
 simulation of the real <a href="https://codex.flywire.ai">FlyWire</a>
 connectome. It walks across your windows, grooms, sleeps, and decides to flee
 your cursor with the same neurons a real fly uses.
-</p>
-
-<p align="center">
-<b>Fork of <a href="https://github.com/DenisSergeevitch/desktop-fly">DenisSergeevitch/desktop-fly</a>
-— this one gives the fly a sense of smell for vibecode.</b>
-</p>
-
-<p align="center">
-It scans your disk for agent markers (<code>AGENTS.md</code>,
-<code>CLAUDE.md</code>, <code>.cursor/rules</code>, <code>.kiro/steering</code>
-and ~40 more) and turns anything on screen that leads to them into an odour
-source: an editor or terminal window with the project open, a row in the front
-Finder window, a folder icon on the desktop. An open project smells strongest,
-a closed icon weakest, and the reach of each grows with how much vibecode it
-holds — a hub of six marked repos is smelled across the whole screen, a single
-weak folder only from nearby. The steering neurons then walk the fly there,
-and when the smell is far the population wakes up enough to make it fly.
 </p>
 
 <p align="center">
