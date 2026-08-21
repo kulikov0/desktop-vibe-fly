@@ -38,6 +38,7 @@ struct VibeSettings {
     var boutSeconds: CGFloat = 5
     var boutEverySeconds: CGFloat = 4
     var idleDrive: CGFloat = 0.6
+    var noveltyHold: CGFloat = 6
     var windowTargets = true
 
     var markers: [String: Double] = [
@@ -98,6 +99,7 @@ struct VibeSettings {
         if let v = raw["boutSeconds"] as? Double { s.boutSeconds = CGFloat(v) }
         if let v = raw["boutEverySeconds"] as? Double { s.boutEverySeconds = CGFloat(v) }
         if let v = raw["idleDrive"] as? Double { s.idleDrive = CGFloat(v) }
+        if let v = raw["noveltyHold"] as? Double { s.noveltyHold = CGFloat(v) }
         if let v = raw["windowTargets"] as? Bool { s.windowTargets = v }
         if let v = raw["countBonus"] as? Double { s.countBonus = v }
         if let v = raw["maxFolderScore"] as? Double { s.maxFolderScore = v }

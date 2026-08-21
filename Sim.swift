@@ -149,7 +149,7 @@ final class LIFSim {
     private let loomGain: Float = 0.30
     private let attractGain: Float = 0.07
     private let attractFwdGain: Float = 0.30
-    private let attractArousalGain: Float = 0.05
+    private let attractArousalGain: Float = 0.08
     private let rateAlpha: Float = 1.0 / 120.0
     private var burstUntil = 0            // occasional "arousal" noise bursts
     private var burstNext = 12_000

@@ -589,6 +589,145 @@ func runBehaviorTest() {
                        t.minBearing, Int(t.minDist), t.walk))
     }
 
+    // The acceptance test for the whole odour feature: a vibecode window opens
+    // somewhere on screen and the fly has to leave the ground for it, not
+    // stroll over eventually. Runs the app's own OdorDrive -> LIFSim ->
+    // SignalBuilder -> Fly chain, so nothing here can pass on a stub.
+    bodyCheck("a vibecode window appears -> fly flies at it") {
+        let settings = VibeSettings()
+        let d0 = hypot(bounds.width, bounds.height) / settings.d0Divisor
+        // spread around the fly and inside a 1512x982 screen
+        let spots = [CGPoint(x: 620, y: 0), CGPoint(x: 520, y: 300),
+                     CGPoint(x: -560, y: 200), CGPoint(x: -600, y: -150),
+                     CGPoint(x: 300, y: -420), CGPoint(x: -350, y: 400),
+                     CGPoint(x: 640, y: -220), CGPoint(x: -120, y: -430)]
+
+        func trial(at spot: CGPoint?) -> (takeoff: CGFloat, minDist: CGFloat, air: CGFloat) {
+            let sim = LIFSim(circuit: data.circuit, spikeBus: nil)
+            let builder = SignalBuilder()
+            let odor = OdorDrive(settings: settings)
+            let fly = Fly(at: .zero)
+            fly.state = .walking
+            fly.speed = 25
+            fly.heading = 0
+            odor.setSources([], d0: d0)
+            sim.step(400)
+            _ = sim.consumeGF()
+
+            func step() {
+                let a = odor.update(pos: fly.pos, heading: fly.heading, dt: dt, sim: sim)
+                sim.attractL = a.l
+                sim.attractR = a.r
+                sim.attractFwd = a.fwd
+                sim.step(Int((dt * 1000).rounded()))
+                let s = builder.make(sim, dt: dt,
+                                     holdSteering: a.l + a.r + a.fwd > 0.001)
+                fly.update(dt: dt, bounds: bounds, mouse: nil, signals: s)
+            }
+            for _ in 0..<120 { step() }          // 2 s with nothing to smell
+            guard let spot = spot else {         // control run: no window ever opens
+                var air: CGFloat = 0
+                for _ in 0..<900 { step(); if fly.state == .flying { air += 1 } }
+                return (-1, 0, air / 900)
+            }
+            odor.setSources([(point: spot, weight: 14, token: "slop")], d0: d0)
+            func dist() -> CGFloat { hypot(spot.x - fly.pos.x, spot.y - fly.pos.y) }
+            var takeoff: CGFloat = -1
+            var minDist = dist()
+            var air: CGFloat = 0
+            var t: CGFloat = 0
+            for _ in 0..<900 {                   // 15 s to get there
+                step()
+                if fly.state == .flying {
+                    air += 1
+                    if takeoff < 0 { takeoff = t }
+                }
+                minDist = min(minDist, dist())
+                t += dt
+            }
+            return (takeoff, minDist, air / 900)
+        }
+
+        // Control scored on the same question as the real runs — did she leave
+        // the ground in the first 4 s — rather than on airborne fraction, which
+        // one stray spontaneous flight was enough to swing 0-23%.
+        var controlLaunched = 0
+        var controlAir: CGFloat = 0
+        for _ in 0..<5 {
+            let c = trial(at: nil)
+            if c.takeoff >= 0 && c.takeoff < 4 { controlLaunched += 1 }
+            controlAir += c.air
+        }
+        controlAir /= 5
+        var launched = 0
+        var dists: [CGFloat] = []
+        var odourAir: CGFloat = 0
+        for spot in spots {
+            let r = trial(at: spot)
+            if r.takeoff >= 0 && r.takeoff < 4 { launched += 1 }
+            dists.append(r.minDist)
+            odourAir += r.air
+        }
+        odourAir /= CGFloat(spots.count)
+        let median = dists.sorted()[dists.count / 2]
+        let n = spots.count
+        // Scored on the median approach rather than a k-of-n quorum: per-trial
+        // arrival is ~92%, so any quorum tight enough to mean something fails on
+        // its own binomial tail. The contrast against the odourless control is
+        // what makes "she flies at it" a claim about the smell and not about a
+        // fly that simply flies a lot.
+        let ok = launched >= n - 1 && median < 250 && controlLaunched <= 1
+        return (ok, String(format: "took off <4s in %d/%d vs %d/5 odourless, "
+                           + "median closest %d pt, worst %d pt "
+                           + "| airborne %.0f%% with odour vs %.0f%% without",
+                           launched, n, controlLaunched, Int(median),
+                           Int(dists.max() ?? 0), odourAir * 100, controlAir * 100))
+    }
+
+    // Arriving is not the same as staying: the strongest smell is at the window
+    // centre, so that is where she has to end up rather than parked beside it.
+    bodyCheck("fly settles on the source centre, not beside it") {
+        let settings = VibeSettings()
+        let d0 = hypot(bounds.width, bounds.height) / settings.d0Divisor
+        let spots = [CGPoint(x: 300, y: 0), CGPoint(x: -280, y: 160),
+                     CGPoint(x: 120, y: -300), CGPoint(x: -200, y: -220),
+                     CGPoint(x: 340, y: 240), CGPoint(x: 0, y: 330)]
+
+        func park(at spot: CGPoint) -> CGFloat {
+            let sim = LIFSim(circuit: data.circuit, spikeBus: nil)
+            let builder = SignalBuilder()
+            let odor = OdorDrive(settings: settings)
+            let fly = Fly(at: .zero)
+            fly.state = .walking
+            fly.speed = 25
+            fly.heading = 0
+            odor.setSources([(point: spot, weight: 14, token: "slop")], d0: d0)
+            sim.step(400)
+            _ = sim.consumeGF()
+            var tail: [CGFloat] = []
+            for frame in 0..<1800 {                    // 30 s
+                let a = odor.update(pos: fly.pos, heading: fly.heading, dt: dt, sim: sim)
+                sim.attractL = a.l
+                sim.attractR = a.r
+                sim.attractFwd = a.fwd
+                sim.step(Int((dt * 1000).rounded()))
+                let s = builder.make(sim, dt: dt, holdSteering: a.l + a.r + a.fwd > 0.001)
+                fly.update(dt: dt, bounds: bounds, mouse: nil, signals: s)
+                if frame >= 1440 {                     // where she sits over the last 6 s
+                    tail.append(hypot(spot.x - fly.pos.x, spot.y - fly.pos.y))
+                }
+            }
+            return tail.reduce(0, +) / CGFloat(tail.count)
+        }
+
+        let parked = spots.map(park).sorted()
+        let median = parked[parked.count / 2]
+        // she rests ~22 pt out, half a body length; the gate covers the tail
+        return (median < 150,
+                String(format: "median resting distance %d pt (gate 150), spread %d-%d pt",
+                       Int(median), Int(parked.first ?? 0), Int(parked.last ?? 0)))
+    }
+
     print(failures == 0 ? "ALL BEHAVIOR TESTS PASS" : "\(failures) FAILURES")
     exit(failures == 0 ? 0 : 1)
 }
@@ -623,6 +762,100 @@ func attractionSplit(pos: CGPoint, heading: CGFloat, target: CGPoint, weight: CG
         r = crossZ >= 0 ? 0 : drive
     }
     return (Float(l), Float(r), Float(drive * clampf(ahead, 0, 1)))
+}
+
+// The olfactory half of the fly, split out of Coordinator so the behavior
+// suite drives the same object the app does instead of a copy of it.
+final class OdorDrive {
+    typealias Source = (point: CGPoint, weight: CGFloat, token: String)
+
+    private let settings: VibeSettings
+    private var sources: [Source] = []
+    private var boutTime: CGFloat = 0
+    private var knownTokens: Set<String> = []
+    private var pendingBurst = false
+    private var noveltyTarget: Source?
+    private var noveltyHold: CGFloat = 0
+    private var noveltyCooldown: CGFloat = 0
+    private(set) var target: Source?
+    private(set) var satiation: CGFloat = 0
+    private(set) var boutOn = false
+    private(set) var d0: CGFloat = 200
+
+    init(settings: VibeSettings) { self.settings = settings }
+
+    func setSources(_ s: [Source], d0: CGFloat) {
+        sources = s
+        self.d0 = d0
+        let tokens = Set(s.map { $0.token })
+        defer { knownTokens = tokens }
+        // A source that just appeared is an event on its own. Ranking by
+        // concentration would miss it: something fresh across the screen always
+        // smells weaker than something dull underfoot.
+        guard noveltyCooldown == 0 else { return }
+        let strongest = s.map { $0.weight }.max() ?? 0
+        let fresh = s.filter { !knownTokens.contains($0.token) && $0.weight >= strongest * 0.5 }
+        guard let f = fresh.max(by: { $0.weight < $1.weight }) else { return }
+        pendingBurst = true
+        noveltyTarget = f
+        noveltyHold = settings.noveltyHold
+        noveltyCooldown = 6
+        vibeLog(String(format: "APPEARED \"%@\" w=%.1f at (%.0f,%.0f) -> onset burst, takeoff",
+                       f.token, f.weight, f.point.x, f.point.y))
+    }
+
+    private func strongest(from pos: CGPoint)
+        -> (target: Source?, total: CGFloat, dist: CGFloat, best: CGFloat) {
+        var best: Source?
+        var bestConc: CGFloat = 0
+        var bestDist: CGFloat = 0
+        var total: CGFloat = 0
+        for s in sources {
+            let d = hypot(s.point.x - pos.x, s.point.y - pos.y)
+            let conc = odorConcentration(weight: s.weight, dist: d, d0: d0)
+            guard conc > CGFloat(settings.odorThreshold) else { continue }
+            total += conc
+            if conc > bestConc { bestConc = conc; best = s; bestDist = d }
+        }
+        return (best, total, bestDist, bestConc)
+    }
+
+    func update(pos: CGPoint, heading: CGFloat, dt: CGFloat, sim: LIFSim?)
+        -> (l: Float, r: Float, fwd: Float) {
+        noveltyCooldown = max(0, noveltyCooldown - dt)
+        noveltyHold = max(0, noveltyHold - dt)
+        if pendingBurst, let sim = sim {
+            pendingBurst = false
+            sim.stimulate(sim.arousalPool, strength: 0.12, durationMs: 300)
+        }
+        var sensed = strongest(from: pos)
+        // a fresh source holds attention for a few seconds; otherwise she takes
+        // off on the burst and then drifts to whatever happens to be nearest
+        if noveltyHold > 0, let nt = noveltyTarget,
+           sources.contains(where: { $0.token == nt.token }) {
+            let d = max(20, hypot(nt.point.x - pos.x, nt.point.y - pos.y))
+            sensed = (nt, sensed.total, d,
+                      odorConcentration(weight: nt.weight, dist: d, d0: d0))
+        }
+        target = sensed.target
+        satiation = clampf(sensed.best / CGFloat(settings.odorFull), 0, 1)
+        // motivation to fly is about being FAR from the smell: concentration rises
+        // on approach, so feeding it raw would make her take off next to the folder
+        let reach = clampf((sensed.dist - d0) / (2 * d0), 0, 1)
+        sim?.attractArousal =
+            Float(clampf(sensed.total / CGFloat(settings.arousalFull), 0, 1) * reach)
+        guard let t = sensed.target else { boutOn = false; satiation = 0; return (0, 0, 0) }
+        if boutOn {
+            boutTime -= dt
+            if boutTime <= 0 { boutOn = false }
+        } else if rnd(0...1) < dt / settings.boutEverySeconds {
+            boutOn = true
+            boutTime = settings.boutSeconds
+        }
+        return attractionSplit(pos: pos, heading: heading, target: t.point,
+                               weight: t.weight, d0: d0, settings: settings,
+                               gate: boutOn ? 1 : settings.idleDrive)
+    }
 }
 
 final class SignalBuilder {
@@ -687,18 +920,14 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     private(set) var lastFlyPos = CGPoint.zero
 
     private let vibe: VibeSettings
-    private var odorSources: [(point: CGPoint, weight: CGFloat, token: String)] = []
-    private var vibeTarget: (point: CGPoint, weight: CGFloat, token: String)?
-    private var odorD0: CGFloat = 200
-    private var satiation: CGFloat = 0
+    private let odor: OdorDrive
     private var vibeLogTime: TimeInterval = 0
-    private var boutOn = false
-    private var boutTime: CGFloat = 0
 
     init(bounds: CGSize, sim: LIFSim?, vibe: VibeSettings = VibeSettings()) {
         self.bounds = bounds
         self.sim = sim
         self.vibe = vibe
+        self.odor = OdorDrive(settings: vibe)
         self.scene = buildScene(bounds: bounds)
         super.init()
         enqueue { $0.addFlyNow() }
@@ -737,54 +966,15 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
     func setOdorSources(_ s: [(point: CGPoint, weight: CGFloat, token: String)]) {
         enqueue { c in
-            c.odorSources = s
-            c.odorD0 = hypot(c.bounds.width, c.bounds.height) / c.vibe.d0Divisor
+            c.odor.setSources(s, d0: hypot(c.bounds.width, c.bounds.height) / c.vibe.d0Divisor)
         }
-    }
-
-    private func strongestSource(from pos: CGPoint)
-        -> (target: (point: CGPoint, weight: CGFloat, token: String)?, total: CGFloat,
-            dist: CGFloat, best: CGFloat) {
-        var best: (point: CGPoint, weight: CGFloat, token: String)?
-        var bestConc: CGFloat = 0
-        var bestDist: CGFloat = 0
-        var total: CGFloat = 0
-        for s in odorSources {
-            let d = hypot(s.point.x - pos.x, s.point.y - pos.y)
-            let conc = odorConcentration(weight: s.weight, dist: d, d0: odorD0)
-            guard conc > CGFloat(vibe.odorThreshold) else { continue }
-            total += conc
-            if conc > bestConc { bestConc = conc; best = s; bestDist = d }
-        }
-        return (best, total, bestDist, bestConc)
-    }
-
-    private func computeAttraction(fly: Fly, dt: CGFloat) -> (l: Float, r: Float, fwd: Float) {
-        let sensed = strongestSource(from: fly.pos)
-        vibeTarget = sensed.target
-        satiation = clampf(sensed.best / CGFloat(vibe.odorFull), 0, 1)
-        // motivation to fly is about being FAR from the smell: concentration rises
-        // on approach, so feeding it raw would make her take off next to the folder
-        let reach = clampf((sensed.dist - odorD0) / (2 * odorD0), 0, 1)
-        sim?.attractArousal = Float(clampf(sensed.total / CGFloat(vibe.arousalFull), 0, 1) * reach)
-        guard let t = sensed.target else { boutOn = false; satiation = 0; return (0, 0, 0) }
-        if boutOn {
-            boutTime -= dt
-            if boutTime <= 0 { boutOn = false }
-        } else if rnd(0...1) < dt / vibe.boutEverySeconds {
-            boutOn = true
-            boutTime = vibe.boutSeconds
-        }
-        return attractionSplit(pos: fly.pos, heading: fly.heading, target: t.point,
-                               weight: t.weight, d0: odorD0, settings: vibe,
-                               gate: boutOn ? 1 : vibe.idleDrive)
     }
 
     // the fly moved to a different display: new bounds + camera extent
     func retarget(size: CGSize) {
         enqueue { c in
             c.bounds = size
-            c.odorD0 = hypot(size.width, size.height) / c.vibe.d0Divisor
+            c.odor.setSources([], d0: hypot(size.width, size.height) / c.vibe.d0Divisor)
             c.terrain = []   // stale until the next window poll
             if let camNode = c.scene.rootNode.childNode(withName: "camera", recursively: false) {
                 camNode.camera?.orthographicScale = Double(size.height / 2)
@@ -887,27 +1077,10 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             sim.loomL = max(sensory.l, windowLoomL)
             sim.loomR = max(sensory.r, windowLoomR)
             sim.airPuff = max(sensory.puff, Float(typingLevel * 0.30))
-            let attract = computeAttraction(fly: first, dt: dt)
+            let attract = odor.update(pos: first.pos, heading: first.heading, dt: dt, sim: sim)
             sim.attractL = attract.l
             sim.attractR = attract.r
             sim.attractFwd = attract.fwd
-            if vibeDebug && t - vibeLogTime > 0.5 {
-                vibeLogTime = t
-                let hdg = first.heading
-                if let vt = vibeTarget {
-                    let rel = CGPoint(x: vt.point.x - first.pos.x, y: vt.point.y - first.pos.y)
-                    let d = hypot(rel.x, rel.y)
-                    let bear = angleDiff(hdg, atan2(rel.y, rel.x))
-                    vibeLog(String(format: "fly (%.0f,%.0f) hdg %+.2f | target \"%@\" %.1f at "
-                            + "(%.0f,%.0f) d=%.0f bearing %+.2f | drive L/R/F %.3f/%.3f/%.3f %@",
-                            first.pos.x, first.pos.y, hdg, vt.token, vt.weight,
-                            vt.point.x, vt.point.y, d, bear,
-                            attract.l, attract.r, attract.fwd, boutOn ? "BOUT" : "idle"))
-                } else {
-                    vibeLog(String(format: "fly (%.0f,%.0f) hdg %+.2f | no target",
-                                   first.pos.x, first.pos.y, hdg))
-                }
-            }
             // body -> brain: leg proprioception from the current gait
             sim.gaitDrive = Float(first.walkingIntensity)
             sim.gaitPhase = Float(first.gaitPhasePublic)
@@ -918,7 +1091,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             // does not take off. Compressed like the circadian scale — a linear
             // multiplier here silences the network entirely.
             sim.activityScale = (1 - (1 - activity) * 0.35) * (sleepy ? 0.75 : 1)
-                * Float(1 - satiation * 0.2)
+                * Float(1 - odor.satiation * 0.2)
             sim.sensoryGate = sleepy ? 0.55 : 1
             loomOverride = max(0, loomOverride - dt * 1.2)   // override decays
             msAccumulator += Double(dt) * 1000
@@ -931,6 +1104,26 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             s.tempo = tempo
             s.sleep = sleepy
             signals = s
+            // logged after the signals exist, so the columns are the values the
+            // body actually got rather than a guess reconstructed from rates
+            if vibeDebug && t - vibeLogTime > 0.5 {
+                vibeLogTime = t
+                if let vt = odor.target {
+                    let rel = CGPoint(x: vt.point.x - first.pos.x, y: vt.point.y - first.pos.y)
+                    let d = hypot(rel.x, rel.y)
+                    vibeLog(String(format: "fly (%.0f,%.0f) hdg %+.2f %@ | target \"%@\" %.1f "
+                            + "d=%.0f bearing %+.2f | drive L/R/F %.2f/%.2f/%.2f %@ "
+                            + "| turn %+.2f walk %.2f arousal %.2f",
+                            first.pos.x, first.pos.y, first.heading, first.stateName,
+                            vt.token, vt.weight, d, angleDiff(first.heading, atan2(rel.y, rel.x)),
+                            attract.l, attract.r, attract.fwd, odor.boutOn ? "BOUT" : "idle",
+                            s.turnBias, s.walkDrive, s.arousal))
+                } else {
+                    vibeLog(String(format: "fly (%.0f,%.0f) hdg %+.2f %@ | no target | arousal %.2f",
+                                   first.pos.x, first.pos.y, first.heading, first.stateName,
+                                   s.arousal))
+                }
+            }
         }
 
         for (i, fly) in flies.enumerated() {

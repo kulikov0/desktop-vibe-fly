@@ -10,7 +10,11 @@ let FLY_SCALE: CGFloat = 1.15
 let EDGE_MARGIN: CGFloat = 50
 let SCARE_RADIUS: CGFloat = 110        // legacy behavior (non-connectome flies) only
 let NERVOUS_RADIUS: CGFloat = 240      // legacy behavior only
-let FLIGHT_TURN_GAIN: CGFloat = 2.0    // DNa steering is stronger in the air
+// Turn radius is speed over turn rate. At the old gains the fly needed ~270 pt
+// of room to come about, more than the distance to whatever she was chasing, so
+// she circled her target instead of landing on it.
+let FLIGHT_TURN_GAIN: CGFloat = 6.0
+let GROUND_TURN_GAIN: CGFloat = 5.0
 
 func rnd(_ range: ClosedRange<CGFloat>) -> CGFloat { CGFloat.random(in: range) }
 func clampf(_ v: CGFloat, _ lo: CGFloat, _ hi: CGFloat) -> CGFloat { min(hi, max(lo, v)) }
@@ -252,7 +256,9 @@ func buildFlyModel() -> FlyModel {
 // MARK: - Behavior
 
 final class Fly {
-    enum State { case walking, idle, grooming, flying, sleeping }
+    enum State: String { case walking, idle, grooming, flying, sleeping }
+
+    var stateName: String { state.rawValue }
 
     let model: FlyModel
     var node: SCNNode { model.root }
@@ -474,7 +480,13 @@ final class Fly {
                 let target = (14 + s.walkDrive * 55) * s.tempo
                 speed += (target - speed) * min(1, 3 * dt)
             }
-            heading += s.turnBias * dt   // DNa01/DNa02 steering
+            heading += s.turnBias * GROUND_TURN_GAIN * dt   // DNa01/DNa02 steering
+        }
+        // An olfactory onset burst drives the population past 0.7. That is not a
+        // dice roll: she leaves the ground now, out of whatever she was doing.
+        if s.arousal > 0.7 && scareCooldown == 0 {
+            startFlight(bounds: bounds, effort: 0.35 + s.arousal * 0.6)
+            return
         }
         // spontaneous takeoff, gated on whole-population arousal; flight
         // altitude/effort scales with how aroused the network is
