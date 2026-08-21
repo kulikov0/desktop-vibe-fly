@@ -630,7 +630,7 @@ func runBehaviorTest() {
                 for _ in 0..<900 { step(); if fly.state == .flying { air += 1 } }
                 return (-1, 0, air / 900)
             }
-            odor.setSources([(point: spot, weight: 14, token: "slop")], d0: d0)
+            odor.setSources([(point: spot, weight: 14, token: "slop", id: "win:1")], d0: d0)
             func dist() -> CGFloat { hypot(spot.x - fly.pos.x, spot.y - fly.pos.y) }
             var takeoff: CGFloat = -1
             var minDist = dist()
@@ -701,7 +701,7 @@ func runBehaviorTest() {
             fly.state = .walking
             fly.speed = 25
             fly.heading = 0
-            odor.setSources([(point: spot, weight: 14, token: "slop")], d0: d0)
+            odor.setSources([(point: spot, weight: 14, token: "slop", id: "win:1")], d0: d0)
             sim.step(400)
             _ = sim.consumeGF()
             var tail: [CGFloat] = []
@@ -726,6 +726,67 @@ func runBehaviorTest() {
         return (median < 150,
                 String(format: "median resting distance %d pt (gate 150), spread %d-%d pt",
                        Int(median), Int(parked.first ?? 0), Int(parked.last ?? 0)))
+    }
+
+    bodyCheck("a new window is news even when weak or a repeat; moving one is not") {
+        let settings = VibeSettings()
+        let d0 = hypot(bounds.width, bounds.height) / settings.d0Divisor
+        let first = CGPoint(x: 260, y: 0)
+        let elsewhere = CGPoint(x: 340, y: 150)
+
+        enum Change { case secondWindow, moved, weakProject }
+
+        func tookOff(_ change: Change) -> Bool {
+            let sim = LIFSim(circuit: data.circuit, spikeBus: nil)
+            let builder = SignalBuilder()
+            let odor = OdorDrive(settings: settings)
+            let fly = Fly(at: .zero)
+            fly.state = .walking
+            fly.speed = 25
+            fly.heading = 0
+            odor.setSources([(first, 14, "slop", "win:1")], d0: d0)
+            sim.step(400)
+            _ = sim.consumeGF()
+            func step() {
+                let a = odor.update(pos: fly.pos, heading: fly.heading, dt: dt, sim: sim)
+                sim.attractL = a.l
+                sim.attractR = a.r
+                sim.attractFwd = a.fwd
+                sim.step(Int((dt * 1000).rounded()))
+                let s = builder.make(sim, dt: dt, holdSteering: a.l + a.r + a.fwd > 0.001)
+                fly.update(dt: dt, bounds: bounds, mouse: nil, signals: s)
+            }
+            for _ in 0..<540 { step() }        // 9 s: novelty cooldown expires, she settles
+            switch change {
+            case .secondWindow:
+                odor.setSources([(first, 14, "slop", "win:1"),
+                                 (elsewhere, 14, "slop", "win:2")], d0: d0)
+            case .moved:
+                odor.setSources([(elsewhere, 14, "slop", "win:1")], d0: d0)
+            case .weakProject:
+                odor.setSources([(first, 14, "slop", "win:1"),
+                                 (elsewhere, 4.9, "whitelist-bypass", "win:2")], d0: d0)
+            }
+            var was = fly.state
+            var launched = false
+            for _ in 0..<60 {                  // the onset burst launches her in ~0.1 s
+                step()
+                if fly.state == .flying && was != .flying { launched = true }
+                was = fly.state
+            }
+            return launched
+        }
+
+        var news = 0, drag = 0, weak = 0
+        for _ in 0..<6 { if tookOff(.secondWindow) { news += 1 } }
+        for _ in 0..<6 { if tookOff(.moved) { drag += 1 } }
+        for _ in 0..<6 { if tookOff(.weakProject) { weak += 1 } }
+        // same geometry every way, so the only difference is what changed about
+        // the source; scored as a contrast because a smell can also launch her
+        // on distance alone
+        return (news >= 5 && weak >= 5 && news - drag >= 3,
+                "took off for a second window \(news)/6, a weak new project "
+                + "\(weak)/6, the same window moved \(drag)/6")
     }
 
     print(failures == 0 ? "ALL BEHAVIOR TESTS PASS" : "\(failures) FAILURES")
@@ -767,12 +828,12 @@ func attractionSplit(pos: CGPoint, heading: CGFloat, target: CGPoint, weight: CG
 // The olfactory half of the fly, split out of Coordinator so the behavior
 // suite drives the same object the app does instead of a copy of it.
 final class OdorDrive {
-    typealias Source = (point: CGPoint, weight: CGFloat, token: String)
+    typealias Source = (point: CGPoint, weight: CGFloat, token: String, id: String)
 
     private let settings: VibeSettings
     private var sources: [Source] = []
     private var boutTime: CGFloat = 0
-    private var knownTokens: Set<String> = []
+    private var known: Set<String> = []
     private var pendingBurst = false
     private var noveltyTarget: Source?
     private var noveltyHold: CGFloat = 0
@@ -787,14 +848,17 @@ final class OdorDrive {
     func setSources(_ s: [Source], d0: CGFloat) {
         sources = s
         self.d0 = d0
-        let tokens = Set(s.map { $0.token })
-        defer { knownTokens = tokens }
+        // identity is window-plus-project: a second window on the same project
+        // counts as a new smell, dragging one around does not, and an editor
+        // switching projects does
+        let ids = Set(s.map { $0.id + "|" + $0.token })
+        defer { known = ids }
         // A source that just appeared is an event on its own. Ranking by
         // concentration would miss it: something fresh across the screen always
         // smells weaker than something dull underfoot.
         guard noveltyCooldown == 0 else { return }
-        let strongest = s.map { $0.weight }.max() ?? 0
-        let fresh = s.filter { !knownTokens.contains($0.token) && $0.weight >= strongest * 0.5 }
+        let fresh = s.filter { !known.contains($0.id + "|" + $0.token)
+                               && $0.weight >= settings.minScore }
         guard let f = fresh.max(by: { $0.weight < $1.weight }) else { return }
         pendingBurst = true
         noveltyTarget = f
@@ -832,7 +896,7 @@ final class OdorDrive {
         // a fresh source holds attention for a few seconds; otherwise she takes
         // off on the burst and then drifts to whatever happens to be nearest
         if noveltyHold > 0, let nt = noveltyTarget,
-           sources.contains(where: { $0.token == nt.token }) {
+           sources.contains(where: { $0.id == nt.id }) {
             let d = max(20, hypot(nt.point.x - pos.x, nt.point.y - pos.y))
             sensed = (nt, sensed.total, d,
                       odorConcentration(weight: nt.weight, dist: d, d0: d0))
@@ -964,7 +1028,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
     func setTerrain(_ ledges: [Ledge]) { enqueue { $0.terrain = ledges } }
 
-    func setOdorSources(_ s: [(point: CGPoint, weight: CGFloat, token: String)]) {
+    func setOdorSources(_ s: [OdorDrive.Source]) {
         enqueue { c in
             c.odor.setSources(s, d0: hypot(c.bounds.width, c.bounds.height) / c.vibe.d0Divisor)
         }
@@ -1292,22 +1356,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func odorSources(_ windows: [VibeTarget], icons: [IconTarget],
-                     flyPos: CGPoint) -> [(point: CGPoint, weight: CGFloat, token: String)] {
-        var out: [(CGPoint, CGFloat, String)] = []
+                     flyPos: CGPoint) -> [OdorDrive.Source] {
+        var out: [OdorDrive.Source] = []
         for w in windows {
-            out.append((w.center, CGFloat(w.score * w.openness), w.token))
+            out.append((w.center, CGFloat(w.score * w.openness), w.token, w.id))
         }
         for i in icons {
-            out.append((i.center, CGFloat(i.score * i.openness), i.name))
+            out.append((i.center, CGFloat(i.score * i.openness), i.name, i.path))
         }
         if vibeDebug {
             let d0 = hypot(screenFrame.width, screenFrame.height) / vibeSettings.d0Divisor
-            for s in out.sorted(by: { $0.1 > $1.1 }).prefix(6) {
-                let d = hypot(s.0.x - flyPos.x, s.0.y - flyPos.y)
-                let conc = odorConcentration(weight: s.1, dist: d, d0: d0)
-                vibeLog(String(format: "odor \"%@\" w=%.1f d=%.0f conc=%.2f r=%.0f",
-                               s.2, s.1, d, conc,
-                               d0 * (s.1 / CGFloat(vibeSettings.odorThreshold) - 1)))
+            for s in out.sorted(by: { $0.weight > $1.weight }).prefix(6) {
+                let d = hypot(s.point.x - flyPos.x, s.point.y - flyPos.y)
+                let conc = odorConcentration(weight: s.weight, dist: d, d0: d0)
+                vibeLog(String(format: "odor \"%@\" [%@] w=%.1f d=%.0f conc=%.2f at (%.0f,%.0f)",
+                               s.token, s.id, s.weight, d, conc, s.point.x, s.point.y))
             }
         }
         return out

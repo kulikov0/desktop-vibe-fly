@@ -33,6 +33,7 @@ struct VibeTarget {
     let token: String
     let owner: String
     let openness: Double
+    let id: String
 }
 
 final class WindowSense {
@@ -84,6 +85,7 @@ final class WindowSense {
             }
             let center = CGPoint(x: rect.midX - screen.midX,
                                  y: (primaryH - rect.midY) - screen.midY)
+            let covered = occluders.contains { $0.contains(center) }
             occluders.append(CGRect(x: rect.minX - screen.midX,
                                     y: (primaryH - rect.maxY) - screen.midY,
                                     width: rect.width, height: rect.height))
@@ -103,10 +105,11 @@ final class WindowSense {
                     best = settings.ownerFallbackScore
                     bestToken = "owner:" + owner
                 }
-                if best >= settings.minScore {
+                if best >= settings.minScore, !covered {
                     vibe.append(VibeTarget(center: center, topY: topY, score: best,
                                            token: bestToken, owner: owner,
-                                           openness: settings.opennessEditor))
+                                           openness: settings.opennessEditor,
+                                           id: "win:\(num)"))
                 }
             }
         }
