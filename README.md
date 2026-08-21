@@ -5,13 +5,10 @@ Fork of <a href="https://github.com/DenisSergeevitch/desktop-fly">DenisSergeevit
 — the FlyWire-connectome desktop fly, with one addition: it smells vibecode.
 </p>
 
-<p align="center">
-  <video src="https://github.com/kulikov0/desktop-vibe-fly/raw/master/assets/showcase.mp4"
-         width="640" controls muted loop playsinline></video>
-</p>
+https://github.com/user-attachments/assets/de432868-9234-429b-ab5e-f034324fb068
 
 <p align="center"><sub>
-The fly homing in on a vibecoded project. If the player doesn't load, watch
+The fly smelling a vibecoded project and walking to it. Same clip in the repo:
 <a href="assets/showcase.mp4">assets/showcase.mp4</a>.
 </sub></p>
 
